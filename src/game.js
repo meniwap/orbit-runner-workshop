@@ -185,9 +185,11 @@ export function createGame({ canvas, startBtn }) {
   function shootAt(wx, wy) {
     if (state.player.fireCd > 0) return;
     state.player.fireCd = 0.18;
-    let dir = norm(wx - state.player.x, wy - state.player.y);
-    // If the click lands exactly on the player (possible in automated tests), shoot right.
-    if (dir.x === 0 && dir.y === 0) dir = { x: 1, y: 0 };
+    const dx = wx - state.player.x;
+    const dy = wy - state.player.y;
+    let dir = norm(dx, dy);
+    // If the click lands too close to the player center (common in automation), shoot right.
+    if (Math.hypot(dx, dy) < 3) dir = { x: 1, y: 0 };
     const speed = 420;
     state.bullets.push({
       x: state.player.x + dir.x * (state.player.r + 4),
