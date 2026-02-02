@@ -100,6 +100,11 @@ git commit -m "Add playable canvas shooter + playwright hooks"
 ```
 
 ## 5) GitHub עם `gh` (ברגע שמוכנים)
+אם `gh` לא מותקן, ב־macOS אפשר להתקין עם:
+```bash
+brew install gh
+```
+
 התחברות:
 ```bash
 gh auth login
