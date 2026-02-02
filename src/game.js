@@ -132,6 +132,7 @@ export function createGame({ canvas, startBtn }) {
       r: 16,
       hp: 1,
       speed: 0,
+      points: 2,
     });
   }
 
@@ -179,6 +180,7 @@ export function createGame({ canvas, startBtn }) {
       r: 16,
       hp: 2,
       speed: randBetween(rng, 35, 75),
+      points: 1,
     });
   }
 
@@ -268,7 +270,7 @@ export function createGame({ canvas, startBtn }) {
         if (d <= b.r + e.r) {
           e.hp -= 1;
           b.ttl = 0;
-          if (e.hp <= 0) state.score += 1;
+          if (e.hp <= 0) state.score += e.points || 1;
           break;
         }
       }
@@ -374,6 +376,7 @@ export function createGame({ canvas, startBtn }) {
     ctx.textBaseline = 'top';
     ctx.fillText(`Score: ${state.score}`, 12, 12);
     ctx.fillText(`HP: ${Math.max(0, state.player.hp)}`, 12, 32);
+    ctx.fillText(`Shots: ${state.stats.shotsFired}`, 12, 52);
 
     if (state.mode === 'paused') {
       ctx.fillStyle = 'rgba(0,0,0,0.45)';
