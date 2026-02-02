@@ -38,6 +38,11 @@ for _ in {1..60}; do
   sleep 0.25
 done
 
+if ! curl -fsS "$URL" >/dev/null 2>&1; then
+  echo "Preview server did not become ready at: $URL" >&2
+  exit 3
+fi
+
 node "$WEB_GAME_CLIENT" \
   --url "$URL" \
   --actions-file "$WEB_GAME_ACTIONS" \
