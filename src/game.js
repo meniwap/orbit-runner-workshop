@@ -41,6 +41,7 @@ export function createGame({ canvas, startBtn }) {
     time: 0,
     rngSeed: 1337,
     score: 0,
+    stats: { shotsFired: 0 },
     player: {
       x: 0,
       y: 0,
@@ -69,6 +70,9 @@ export function createGame({ canvas, startBtn }) {
   };
 
   let rng = makeRng(state.rngSeed);
+  const testEnv =
+    typeof window !== 'undefined' &&
+    (typeof window.__drainVirtualTimePending === 'function' || typeof window.__vt_pending !== 'undefined');
 
   function worldFromClient(clientX, clientY) {
     const rect = canvas.getBoundingClientRect();
@@ -107,6 +111,7 @@ export function createGame({ canvas, startBtn }) {
     state.mode = 'play';
     state.time = 0;
     state.score = 0;
+    state.stats.shotsFired = 0;
     state.bullets = [];
     state.enemies = [];
     state.spawnTimer = 1.0;
@@ -190,8 +195,9 @@ export function createGame({ canvas, startBtn }) {
       vx: dir.x * speed,
       vy: dir.y * speed,
       r: 4,
-      ttl: 1.25,
+      ttl: 2.0,
     });
+    state.stats.shotsFired += 1;
   }
 
   function update(dt) {
@@ -386,14 +392,37 @@ export function createGame({ canvas, startBtn }) {
   }
 
   let raf = 0;
+  let rafLast = 0;
+  let rafAcc = 0;
+  let externalStepping = false;
   function loop() {
     raf = requestAnimationFrame(loop);
-    update(FIXED_DT);
+    const t = nowMs() / 1000;
+    if (!rafLast) rafLast = t;
+    const dt = Math.min(0.05, Math.max(0, t - rafLast));
+    rafLast = t;
+
+    if (!externalStepping) {
+      rafAcc += dt;
+      const maxSteps = 5;
+      let steps = 0;
+      while (rafAcc >= FIXED_DT && steps < maxSteps) {
+        update(FIXED_DT);
+        rafAcc -= FIXED_DT;
+        steps += 1;
+      }
+    }
     render();
   }
 
   function renderGameToText() {
     const enemiesPreview = state.enemies.slice(0, 10).map((e) => ({ x: e.x, y: e.y, r: e.r, hp: e.hp }));
+    const bulletsPreview = state.bullets.slice(0, 5).map((b) => ({
+      x: Number(b.x.toFixed(2)),
+      y: Number(b.y.toFixed(2)),
+      r: b.r,
+      ttl: Number(b.ttl.toFixed(2)),
+    }));
     const payload = {
       mode: state.mode,
       coords: 'origin top-left; x right; y down',
@@ -419,13 +448,16 @@ export function createGame({ canvas, startBtn }) {
       },
       bullets: {
         count: state.bullets.length,
+        sample: bulletsPreview,
       },
+      stats: state.stats,
     };
     return JSON.stringify(payload);
   }
 
   function advanceTime(ms) {
     const steps = Math.max(1, Math.round(ms / (1000 / 60)));
+    if (testEnv) externalStepping = true;
     for (let i = 0; i < steps; i++) update(FIXED_DT);
     render();
   }
