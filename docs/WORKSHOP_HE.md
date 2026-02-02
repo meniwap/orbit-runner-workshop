@@ -40,6 +40,7 @@ npm run dev
 cd "$HOME/.codex/skills/develop-web-game"
 npm init -y
 npm install playwright
+npm pkg set type=module
 npx playwright install chromium
 ```
 
