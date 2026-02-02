@@ -68,6 +68,12 @@ run_scenario "move" 2 200
 run_scenario "shoot-score" 2 200
 run_scenario "dash" 2 200
 run_scenario "pause" 1 200
+run_scenario "weapon-cycle" 2 200
+run_scenario "shield" 2 200
+run_scenario "streak" 2 200
+run_scenario "hazard" 1 200
+run_scenario "upgrade" 1 200
+run_scenario "elite" 1 200
 run_scenario "shooter" 2 200
 run_scenario "tank" 2 200
 run_scenario "powerups" 2 200

@@ -26,6 +26,8 @@ npm run dev
 - עכבר: כיוון
 - קליק שמאלי: ירי
 - Shift: Dash
+- E: Shield
+- 1/2/3: Weapon
 - `B`: Pause/Resume
 - `A`: Restart
 - `F`: Fullscreen toggle

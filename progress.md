@@ -12,6 +12,7 @@ Original prompt: Build and iterate a playable web game in this workspace, valida
 - Ran the Playwright client against dev server; screenshots + state JSONs are generated under `output/web-game/` with no errors. Smoke shows `score: 1` shortly after start.
 - Added enemy types (chaser/shooter/tank), dash, power-ups, wave scaling, and expanded HUD.
 - Added test suite actions + assertions and ran full test suite (all scenarios passed).
+- Added weapon system, shield, streaks, elite modifiers, hazards, and upgrade flow with expanded test scenarios.
 
 ## TODO
 - Add a Codex automation (daily 09:00) to run `scripts/smoke.sh`.

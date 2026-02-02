@@ -18,7 +18,29 @@ const CONFIG = {
   pickupSpawnMinTest: 4,
   pickupSpawnMaxTest: 7,
   maxPickups: 2,
+  hazardMin: 15,
+  hazardMax: 20,
+  hazardMinTest: 6,
+  hazardMaxTest: 9,
+  hazardTelegraph: 1,
+  hazardSpeed: 220,
+  hazardThickness: 12,
+  shieldDuration: 2,
+  shieldCooldown: 10,
+  upgradeEveryWaves: 2,
 };
+
+const WEAPONS = {
+  1: { id: 1, name: 'Single', angles: [0], fireFactor: 1, pierce: 0 },
+  2: { id: 2, name: 'Spread', angles: [-15, 0, 15], fireFactor: 1.1, pierce: 0 },
+  3: { id: 3, name: 'Pierce', angles: [0], fireFactor: 1.6, pierce: 2 },
+};
+
+const UPGRADE_OPTIONS = [
+  { id: 1, label: '+1 Max HP' },
+  { id: 2, label: 'Dash Cooldown -20%' },
+  { id: 3, label: 'Rapid Fire +2s' },
+];
 
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
@@ -52,6 +74,32 @@ function nowMs() {
   return typeof performance !== 'undefined' ? performance.now() : Date.now();
 }
 
+function rotate(dir, deg) {
+  const r = (deg * Math.PI) / 180;
+  const c = Math.cos(r);
+  const s = Math.sin(r);
+  return { x: dir.x * c - dir.y * s, y: dir.x * s + dir.y * c };
+}
+
+function drawRoundRect(ctx, x, y, w, h, r) {
+  if (ctx.roundRect) {
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, r);
+    return;
+  }
+  const radius = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + w - radius, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+  ctx.lineTo(x + w, y + h - radius);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+  ctx.lineTo(x + radius, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+}
+
 export function createGame({ canvas, startBtn }) {
   const ctx = canvas.getContext('2d', { alpha: false });
   if (!ctx) throw new Error('2D canvas not supported');
@@ -60,12 +108,24 @@ export function createGame({ canvas, startBtn }) {
     typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('scenario') || 'default' : 'default';
 
   const state = {
-    mode: 'menu', // menu | play | paused | gameover
+    mode: 'menu', // menu | play | paused | gameover | upgrade
     time: 0,
     rngSeed: 1337,
     score: 0,
-    stats: { shotsFired: 0, hits: 0, damageTaken: 0, dashesUsed: 0 },
+    stats: {
+      shotsFired: 0,
+      hits: 0,
+      damageTaken: 0,
+      dashesUsed: 0,
+      streak: 0,
+      multiplier: 1,
+    },
     maxHp: CONFIG.maxHp,
+    perks: {
+      dashCooldownFactor: 1,
+      rapidFireBonus: 0,
+      maxHpBonus: 0,
+    },
     player: {
       x: 0,
       y: 0,
@@ -79,6 +139,9 @@ export function createGame({ canvas, startBtn }) {
       dashTime: 0,
       dashDir: { x: 1, y: 0 },
       lastMoveDir: { x: 1, y: 0 },
+      weaponId: 1,
+      shieldCooldown: 0,
+      shieldActive: 0,
     },
     buffs: {
       rapidFire: 0,
@@ -97,6 +160,24 @@ export function createGame({ canvas, startBtn }) {
     spawnDisabled: false,
     testScenario: initialScenario,
     testSpawnIndex: 0,
+    testAutoFire: false,
+    testAutoFireTimer: 0,
+    testWeaponCycleIndex: 0,
+    testShieldTimer: 0,
+    hazard: {
+      mode: 'idle',
+      timer: 0,
+      radius: 0,
+      telegraph: 0,
+      hit: false,
+    },
+    upgrade: {
+      mode: 'none',
+      options: UPGRADE_OPTIONS,
+      selected: null,
+      pendingWave: 0,
+      autoTimer: 0,
+    },
     viewport: {
       baseW: 960,
       baseH: 540,
@@ -151,6 +232,55 @@ export function createGame({ canvas, startBtn }) {
     rng = makeRng(state.rngSeed);
   }
 
+  function setWeapon(id) {
+    const next = Math.max(1, Math.min(3, Number(id) || 1));
+    state.player.weaponId = next;
+  }
+
+  function getDashCooldown() {
+    return CONFIG.dashCooldown * state.perks.dashCooldownFactor;
+  }
+
+  function applyUpgrade(id) {
+    if (id === 1) {
+      state.perks.maxHpBonus += 1;
+      state.maxHp = CONFIG.maxHp + state.perks.maxHpBonus;
+      state.player.hp = Math.min(state.maxHp, state.player.hp + 1);
+    } else if (id === 2) {
+      state.perks.dashCooldownFactor = clamp(state.perks.dashCooldownFactor * 0.8, 0.4, 1);
+      state.player.dashCooldown = Math.min(state.player.dashCooldown, getDashCooldown());
+    } else if (id === 3) {
+      state.perks.rapidFireBonus += 2;
+    }
+    state.upgrade.selected = id;
+    state.upgrade.mode = 'none';
+    state.mode = 'play';
+  }
+
+  function forceUpgrade(id) {
+    applyUpgrade(Number(id) || 1);
+  }
+
+  function beginUpgrade() {
+    if (state.upgrade.mode === 'choice') return;
+    state.upgrade.mode = 'choice';
+    state.upgrade.selected = null;
+    state.mode = 'upgrade';
+    if (testEnv && state.testScenario === 'upgrade') {
+      state.upgrade.autoTimer = 0.4;
+    }
+  }
+
+  function updateUpgrade(dt) {
+    if (state.mode !== 'upgrade') return;
+    if (testEnv && state.testScenario === 'upgrade') {
+      state.upgrade.autoTimer -= dt;
+      if (state.upgrade.autoTimer <= 0) {
+        applyUpgrade(1);
+      }
+    }
+  }
+
   function pickEnemyType() {
     if (testEnv && state.testScenario === 'default') {
       const pattern = ['chaser', 'chaser', 'shooter', 'chaser', 'tank'];
@@ -170,8 +300,9 @@ export function createGame({ canvas, startBtn }) {
   }
 
   function makeEnemy(type, x, y, overrides = {}) {
+    let enemy = null;
     if (type === 'shooter') {
-      return {
+      enemy = {
         type,
         x,
         y,
@@ -183,11 +314,9 @@ export function createGame({ canvas, startBtn }) {
         shootMin: 1.0,
         shootMax: 2.0,
         bulletSpeed: 170,
-        ...overrides,
       };
-    }
-    if (type === 'tank') {
-      return {
+    } else if (type === 'tank') {
+      enemy = {
         type,
         x,
         y,
@@ -195,22 +324,34 @@ export function createGame({ canvas, startBtn }) {
         hp: 5,
         speed: randBetween(rng, 20, 35),
         points: 4,
-        ...overrides,
+      };
+    } else {
+      enemy = {
+        type: 'chaser',
+        x,
+        y,
+        r: 16,
+        hp: 2,
+        speed: randBetween(rng, 45, 85),
+        points: 1,
       };
     }
-    return {
-      type: 'chaser',
-      x,
-      y,
-      r: 16,
-      hp: 2,
-      speed: randBetween(rng, 45, 85),
-      points: 1,
-      ...overrides,
-    };
+
+    const eliteRoll = rng();
+    if (!enemy.elite && eliteRoll < 0.15 && !testEnv) {
+      const modifier = rng() < 0.5 ? 'fast' : 'tanky';
+      enemy.elite = true;
+      enemy.modifiers = [modifier];
+      enemy.r += 2;
+      if (modifier === 'fast') enemy.speed *= 1.4;
+      if (modifier === 'tanky') enemy.hp *= 2;
+      enemy.points += 1;
+    }
+
+    return { ...enemy, elite: enemy.elite || false, modifiers: enemy.modifiers || [], ...overrides };
   }
 
-  function spawnEnemy(typeOverride) {
+  function spawnEnemy(typeOverride, eliteOverride) {
     const w = state.viewport.baseW;
     const h = state.viewport.baseH;
     const side = Math.floor(randBetween(rng, 0, 4));
@@ -231,7 +372,16 @@ export function createGame({ canvas, startBtn }) {
       y = randBetween(rng, -pad, h + pad);
     }
     const type = typeOverride || pickEnemyType();
-    state.enemies.push(makeEnemy(type, x, y));
+    const enemy = makeEnemy(type, x, y);
+    if (eliteOverride) {
+      enemy.elite = true;
+      enemy.modifiers = eliteOverride;
+      if (eliteOverride.includes('fast')) enemy.speed *= 1.4;
+      if (eliteOverride.includes('tanky')) enemy.hp *= 2;
+      enemy.r += 2;
+      enemy.points += 1;
+    }
+    state.enemies.push(enemy);
   }
 
   function spawnPickup(typeOverride) {
@@ -253,12 +403,26 @@ export function createGame({ canvas, startBtn }) {
     });
   }
 
+  function setupHazardTimer() {
+    state.hazard.timer = testEnv
+      ? randBetween(rng, CONFIG.hazardMinTest, CONFIG.hazardMaxTest)
+      : randBetween(rng, CONFIG.hazardMin, CONFIG.hazardMax);
+    state.hazard.mode = 'idle';
+    state.hazard.radius = 0;
+    state.hazard.telegraph = 0;
+    state.hazard.hit = false;
+  }
+
   function applyScenario() {
     state.spawnDisabled = false;
     state.pickupTimer = testEnv
       ? randBetween(rng, CONFIG.pickupSpawnMinTest, CONFIG.pickupSpawnMaxTest)
       : randBetween(rng, CONFIG.pickupSpawnMin, CONFIG.pickupSpawnMax);
     state.testSpawnIndex = 0;
+    state.testAutoFire = false;
+    state.testAutoFireTimer = 0;
+    state.testWeaponCycleIndex = 0;
+    state.testShieldTimer = 0;
 
     const scenario = state.testScenario || 'default';
     if (scenario === 'shoot-score') {
@@ -313,6 +477,44 @@ export function createGame({ canvas, startBtn }) {
       state.spawnDisabled = true;
     } else if (scenario === 'wave') {
       state.spawnDisabled = false;
+    } else if (scenario === 'weapon-cycle') {
+      state.spawnDisabled = true;
+      state.player.weaponId = 1;
+      state.testAutoFire = true;
+      state.enemies.push(makeEnemy('chaser', state.player.x + 260, state.player.y, { hp: 3, speed: 0 }));
+    } else if (scenario === 'shield') {
+      state.spawnDisabled = true;
+      state.player.shieldCooldown = 0;
+      state.testShieldTimer = 0.25;
+      state.enemyBullets.push({
+        x: state.player.x + 140,
+        y: state.player.y,
+        vx: -140,
+        vy: 0,
+        r: 4,
+        ttl: 3,
+      });
+    } else if (scenario === 'streak') {
+      state.spawnDisabled = true;
+      state.testAutoFire = true;
+      state.player.weaponId = 3;
+      state.enemies.push(makeEnemy('chaser', state.player.x + 180, state.player.y, { hp: 1, speed: 0 }));
+      state.enemies.push(makeEnemy('chaser', state.player.x + 230, state.player.y, { hp: 1, speed: 0 }));
+    } else if (scenario === 'hazard') {
+      state.spawnDisabled = true;
+      state.hazard.mode = 'telegraph';
+      state.hazard.telegraph = 0.3;
+      state.hazard.radius = 0;
+      state.hazard.hit = false;
+    } else if (scenario === 'upgrade') {
+      state.spawnDisabled = true;
+      state.mode = 'upgrade';
+      state.upgrade.mode = 'choice';
+      state.upgrade.selected = null;
+      state.upgrade.autoTimer = 0.4;
+    } else if (scenario === 'elite') {
+      state.spawnDisabled = true;
+      spawnEnemy('chaser', ['fast']);
     }
   }
 
@@ -320,7 +522,14 @@ export function createGame({ canvas, startBtn }) {
     state.mode = 'play';
     state.time = 0;
     state.score = 0;
-    state.stats = { shotsFired: 0, hits: 0, damageTaken: 0, dashesUsed: 0 };
+    state.stats = {
+      shotsFired: 0,
+      hits: 0,
+      damageTaken: 0,
+      dashesUsed: 0,
+      streak: 0,
+      multiplier: 1,
+    };
     state.bullets = [];
     state.enemyBullets = [];
     state.enemies = [];
@@ -334,6 +543,12 @@ export function createGame({ canvas, startBtn }) {
     state.maxEnemies = CONFIG.baseMaxEnemies;
     state.spawnDisabled = false;
     state.testSpawnIndex = 0;
+    state.testAutoFire = false;
+    state.testAutoFireTimer = 0;
+    state.testWeaponCycleIndex = 0;
+    state.testShieldTimer = 0;
+    state.hazard = { mode: 'idle', timer: 0, radius: 0, telegraph: 0, hit: false };
+    state.upgrade = { mode: 'none', options: UPGRADE_OPTIONS, selected: null, pendingWave: 0, autoTimer: 0 };
 
     rng = makeRng(state.rngSeed);
     state.player.x = state.viewport.baseW / 2;
@@ -347,11 +562,14 @@ export function createGame({ canvas, startBtn }) {
     state.player.dashTime = 0;
     state.player.dashDir = { x: 1, y: 0 };
     state.player.lastMoveDir = { x: 1, y: 0 };
+    state.player.weaponId = 1;
+    state.player.shieldCooldown = 0;
+    state.player.shieldActive = 0;
     state.buffs.rapidFire = 0;
-    state.lastHitAt = -999;
     state.pointer.x = state.player.x;
     state.pointer.y = state.player.y;
 
+    setupHazardTimer();
     applyScenario();
   }
 
@@ -373,25 +591,31 @@ export function createGame({ canvas, startBtn }) {
     }
   }
 
+  function activateShield() {
+    if (state.player.shieldCooldown > 0) return false;
+    state.player.shieldActive = CONFIG.shieldDuration;
+    state.player.shieldCooldown = CONFIG.shieldCooldown;
+    return true;
+  }
+
   function damagePlayer(amount) {
+    if (state.player.shieldActive > 0) {
+      state.player.shieldActive = 0;
+      state.player.invuln = Math.max(state.player.invuln, 0.2);
+      return;
+    }
     if (state.player.invuln > 0) return;
     state.player.hp = Math.max(0, state.player.hp - amount);
     state.stats.damageTaken += amount;
+    state.stats.streak = 0;
+    state.stats.multiplier = 1;
     state.player.invuln = 0.75;
-    state.lastHitAt = state.time;
     if (state.player.hp <= 0) {
       state.mode = 'gameover';
     }
   }
 
-  function shootAt(wx, wy) {
-    if (state.player.fireCd > 0) return;
-    const fireCd = state.buffs.rapidFire > 0 ? CONFIG.rapidFireCd : CONFIG.baseFireCd;
-    state.player.fireCd = fireCd;
-    const dx = wx - state.player.x;
-    const dy = wy - state.player.y;
-    let dir = norm(dx, dy);
-    if (Math.hypot(dx, dy) < 3) dir = { x: 1, y: 0 };
+  function spawnBullet(dir, pierce) {
     const speed = 420;
     state.bullets.push({
       x: state.player.x + dir.x * (state.player.r + 4),
@@ -400,7 +624,23 @@ export function createGame({ canvas, startBtn }) {
       vy: dir.y * speed,
       r: 4,
       ttl: 2.0,
+      pierce: pierce || 0,
     });
+  }
+
+  function shootAt(wx, wy) {
+    if (state.player.fireCd > 0) return;
+    const weapon = WEAPONS[state.player.weaponId] || WEAPONS[1];
+    const baseCd = state.buffs.rapidFire > 0 ? CONFIG.rapidFireCd : CONFIG.baseFireCd;
+    state.player.fireCd = baseCd * weapon.fireFactor;
+    const dx = wx - state.player.x;
+    const dy = wy - state.player.y;
+    let dir = norm(dx, dy);
+    if (Math.hypot(dx, dy) < 3) dir = { x: 1, y: 0 };
+    for (const angle of weapon.angles) {
+      const shotDir = angle === 0 ? dir : rotate(dir, angle);
+      spawnBullet(shotDir, weapon.pierce);
+    }
     state.stats.shotsFired += 1;
   }
 
@@ -414,20 +654,93 @@ export function createGame({ canvas, startBtn }) {
     if (dir.x === 0 && dir.y === 0) dir = { x: 1, y: 0 };
     state.player.dashDir = dir;
     state.player.dashTime = CONFIG.dashDuration;
-    state.player.dashCooldown = CONFIG.dashCooldown;
+    state.player.dashCooldown = getDashCooldown();
     state.player.invuln = Math.max(state.player.invuln, CONFIG.dashInvuln);
     state.stats.dashesUsed += 1;
     return true;
   }
 
+  function updateHazard(dt) {
+    const centerX = state.viewport.baseW / 2;
+    const centerY = state.viewport.baseH / 2;
+    const maxRadius = Math.hypot(centerX, centerY) + 30;
+
+    if (state.hazard.mode === 'idle') {
+      state.hazard.timer -= dt;
+      if (state.hazard.timer <= 0) {
+        state.hazard.mode = 'telegraph';
+        state.hazard.telegraph = CONFIG.hazardTelegraph;
+        state.hazard.radius = 0;
+        state.hazard.hit = false;
+      }
+      return;
+    }
+
+    if (state.hazard.mode === 'telegraph') {
+      state.hazard.telegraph -= dt;
+      if (state.hazard.telegraph <= 0) {
+        state.hazard.mode = 'active';
+        state.hazard.radius = 0;
+      }
+      return;
+    }
+
+    if (state.hazard.mode === 'active') {
+      state.hazard.radius += CONFIG.hazardSpeed * dt;
+      if (!state.hazard.hit) {
+        const dist = len(state.player.x - centerX, state.player.y - centerY);
+        if (Math.abs(dist - state.hazard.radius) <= CONFIG.hazardThickness) {
+          damagePlayer(1);
+          state.hazard.hit = true;
+        }
+      }
+      if (state.hazard.radius >= maxRadius) {
+        setupHazardTimer();
+      }
+    }
+  }
+
   function update(dt) {
+    if (state.mode === 'upgrade') {
+      updateUpgrade(dt);
+      return;
+    }
     if (state.mode !== 'play') return;
 
     state.time += dt;
     state.player.invuln = Math.max(0, state.player.invuln - dt);
     state.player.fireCd = Math.max(0, state.player.fireCd - dt);
     state.player.dashCooldown = Math.max(0, state.player.dashCooldown - dt);
+    state.player.shieldCooldown = Math.max(0, state.player.shieldCooldown - dt);
+    state.player.shieldActive = Math.max(0, state.player.shieldActive - dt);
     state.buffs.rapidFire = Math.max(0, state.buffs.rapidFire - dt);
+
+    if (state.testShieldTimer > 0) {
+      state.testShieldTimer -= dt;
+      if (state.testShieldTimer <= 0) activateShield();
+    }
+
+    if (state.testAutoFire) {
+      state.testAutoFireTimer -= dt;
+      if (state.testAutoFireTimer <= 0) {
+        shootAt(state.player.x + 300, state.player.y);
+        state.testAutoFireTimer = 0.3;
+      }
+    }
+
+    if (state.testScenario === 'weapon-cycle') {
+      const t = state.time;
+      if (state.testWeaponCycleIndex === 0 && t > 0.3) {
+        setWeapon(1);
+        state.testWeaponCycleIndex = 1;
+      } else if (state.testWeaponCycleIndex === 1 && t > 0.7) {
+        setWeapon(2);
+        state.testWeaponCycleIndex = 2;
+      } else if (state.testWeaponCycleIndex === 2 && t > 1.1) {
+        setWeapon(3);
+        state.testWeaponCycleIndex = 3;
+      }
+    }
 
     if (state.player.dashTime > 0) {
       state.player.dashTime = Math.max(0, state.player.dashTime - dt);
@@ -472,6 +785,11 @@ export function createGame({ canvas, startBtn }) {
     if (nextWave !== state.wave) {
       state.wave = nextWave;
       state.waveFlash = 1.25;
+      if (state.wave % CONFIG.upgradeEveryWaves === 0 && state.upgrade.pendingWave !== state.wave) {
+        state.upgrade.pendingWave = state.wave;
+        beginUpgrade();
+        return;
+      }
     }
     state.waveFlash = Math.max(0, state.waveFlash - dt);
     state.maxEnemies = clamp(CONFIG.baseMaxEnemies + state.wave * 2, CONFIG.baseMaxEnemies, CONFIG.maxEnemiesCap);
@@ -539,9 +857,18 @@ export function createGame({ canvas, startBtn }) {
         const d = len(b.x - e.x, b.y - e.y);
         if (d <= b.r + e.r) {
           e.hp -= 1;
-          b.ttl = 0;
           state.stats.hits += 1;
-          if (e.hp <= 0) state.score += e.points || 1;
+          if (b.pierce && b.pierce > 0) {
+            b.pierce -= 1;
+            if (b.pierce <= 0) b.ttl = 0;
+          } else {
+            b.ttl = 0;
+          }
+          if (e.hp <= 0) {
+            state.stats.streak += 1;
+            state.stats.multiplier = 1 + Math.floor(state.stats.streak / 5);
+            state.score += (e.points || 1) * state.stats.multiplier;
+          }
           break;
         }
       }
@@ -577,7 +904,10 @@ export function createGame({ canvas, startBtn }) {
         if (p.type === 'hp') {
           state.player.hp = Math.min(state.maxHp, state.player.hp + 1);
         } else if (p.type === 'rapid') {
-          state.buffs.rapidFire = Math.max(state.buffs.rapidFire, CONFIG.rapidFireDuration);
+          state.buffs.rapidFire = Math.max(
+            state.buffs.rapidFire,
+            CONFIG.rapidFireDuration + state.perks.rapidFireBonus
+          );
         }
         p.ttl = 0;
       } else {
@@ -585,6 +915,8 @@ export function createGame({ canvas, startBtn }) {
       }
     }
     state.pickups = state.pickups.filter((p) => p.ttl > 0);
+
+    updateHazard(dt);
 
     if (state.player.hp <= 0) {
       state.mode = 'gameover';
@@ -622,10 +954,26 @@ export function createGame({ canvas, startBtn }) {
       ctx.fillRect(0, 0, state.viewport.baseW, state.viewport.baseH);
       drawCenteredText('Orbit Runner', state.viewport.baseW / 2, 150, 56);
       drawCenteredText('Arrows: Move  •  Mouse: Aim  •  Click: Shoot', state.viewport.baseW / 2, 240, 18, 'rgba(255,255,255,0.9)');
-      drawCenteredText('Shift: Dash  •  B: Pause  •  A: Restart', state.viewport.baseW / 2, 270, 18, 'rgba(255,255,255,0.8)');
-      drawCenteredText('F: Fullscreen', state.viewport.baseW / 2, 296, 16, 'rgba(255,255,255,0.7)');
+      drawCenteredText('Shift: Dash  •  E: Shield  •  1/2/3: Weapon', state.viewport.baseW / 2, 270, 18, 'rgba(255,255,255,0.8)');
+      drawCenteredText('B: Pause  •  A: Restart  •  F: Fullscreen', state.viewport.baseW / 2, 296, 16, 'rgba(255,255,255,0.7)');
       ctx.restore();
       return;
+    }
+
+    if (state.hazard.mode === 'telegraph') {
+      ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(state.viewport.baseW / 2, state.viewport.baseH / 2, 40, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    if (state.hazard.mode === 'active') {
+      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+      ctx.lineWidth = CONFIG.hazardThickness;
+      ctx.beginPath();
+      ctx.arc(state.viewport.baseW / 2, state.viewport.baseH / 2, state.hazard.radius, 0, Math.PI * 2);
+      ctx.stroke();
     }
 
     // pickups
@@ -655,6 +1003,15 @@ export function createGame({ canvas, startBtn }) {
       if (e.type === 'shooter') ctx.fillStyle = '#a855f7';
       else if (e.type === 'tank') ctx.fillStyle = '#f97316';
       else ctx.fillStyle = '#ff4d6d';
+
+      if (e.elite) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, e.r + 3, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
       ctx.beginPath();
       ctx.arc(e.x, e.y, e.r, 0, Math.PI * 2);
       ctx.fill();
@@ -687,6 +1044,14 @@ export function createGame({ canvas, startBtn }) {
     ctx.arc(state.player.x, state.player.y, state.player.r, 0, Math.PI * 2);
     ctx.fill();
 
+    if (state.player.shieldActive > 0) {
+      ctx.strokeStyle = 'rgba(59,130,246,0.7)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(state.player.x, state.player.y, state.player.r + 8, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
     // aim line
     ctx.strokeStyle = 'rgba(255,255,255,0.25)';
     ctx.lineWidth = 2;
@@ -706,9 +1071,18 @@ export function createGame({ canvas, startBtn }) {
     const dashLabel =
       state.player.dashCooldown > 0 ? `Dash: ${state.player.dashCooldown.toFixed(1)}s` : 'Dash: Ready';
     ctx.fillText(dashLabel, 12, 72);
+    const shieldLabel =
+      state.player.shieldActive > 0
+        ? 'Shield: Active'
+        : state.player.shieldCooldown > 0
+          ? `Shield: ${state.player.shieldCooldown.toFixed(1)}s`
+          : 'Shield: Ready';
+    ctx.fillText(shieldLabel, 12, 92);
     if (state.buffs.rapidFire > 0) {
-      ctx.fillText(`Rapid: ${state.buffs.rapidFire.toFixed(1)}s`, 12, 92);
+      ctx.fillText(`Rapid: ${state.buffs.rapidFire.toFixed(1)}s`, 12, 112);
     }
+    ctx.fillText(`Streak: ${state.stats.streak}  x${state.stats.multiplier}`, 12, 132);
+    ctx.fillText(`Weapon: W${state.player.weaponId} ${WEAPONS[state.player.weaponId].name}`, 12, 152);
     ctx.textAlign = 'right';
     ctx.fillText(`Wave ${state.wave}`, state.viewport.baseW - 12, 12);
 
@@ -722,6 +1096,33 @@ export function createGame({ canvas, startBtn }) {
       ctx.fillRect(0, 0, state.viewport.baseW, state.viewport.baseH);
       drawCenteredText('Paused', state.viewport.baseW / 2, state.viewport.baseH / 2 - 10, 48);
       drawCenteredText('Press B to resume', state.viewport.baseW / 2, state.viewport.baseH / 2 + 38, 18, 'rgba(255,255,255,0.85)');
+    }
+
+    if (state.mode === 'upgrade') {
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(0, 0, state.viewport.baseW, state.viewport.baseH);
+      drawCenteredText('Upgrade', state.viewport.baseW / 2, 140, 48);
+      const cardW = 220;
+      const cardH = 90;
+      const gap = 20;
+      const startX = state.viewport.baseW / 2 - (cardW * 3 + gap * 2) / 2 + cardW / 2;
+      UPGRADE_OPTIONS.forEach((opt, idx) => {
+        const x = startX + idx * (cardW + gap);
+        const y = state.viewport.baseH / 2;
+        ctx.fillStyle = 'rgba(255,255,255,0.08)';
+        ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+        ctx.lineWidth = 2;
+        drawRoundRect(ctx, x - cardW / 2, y - cardH / 2, cardW, cardH, 12);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(255,255,255,0.95)';
+        ctx.font = '600 16px system-ui';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(opt.label, x, y);
+        ctx.font = '600 14px system-ui';
+        ctx.fillText(`Press ${idx + 1}`, x, y + 26);
+      });
     }
 
     if (state.mode === 'gameover') {
@@ -767,12 +1168,15 @@ export function createGame({ canvas, startBtn }) {
       r: e.r,
       hp: e.hp,
       type: e.type,
+      elite: e.elite,
+      modifiers: e.modifiers,
     }));
     const bulletsPreview = state.bullets.slice(0, 5).map((b) => ({
       x: Number(b.x.toFixed(2)),
       y: Number(b.y.toFixed(2)),
       r: b.r,
       ttl: Number(b.ttl.toFixed(2)),
+      pierce: b.pierce || 0,
     }));
     const enemyBulletsPreview = state.enemyBullets.slice(0, 5).map((b) => ({
       x: Number(b.x.toFixed(2)),
@@ -787,6 +1191,13 @@ export function createGame({ canvas, startBtn }) {
       type: p.type,
       ttl: Number(p.ttl.toFixed(2)),
     }));
+    const hazardActive = state.hazard.mode !== 'idle';
+    const hazardTtl =
+      state.hazard.mode === 'telegraph'
+        ? state.hazard.telegraph
+        : state.hazard.mode === 'active'
+          ? Math.max(0, (Math.hypot(state.viewport.baseW / 2, state.viewport.baseH / 2) - state.hazard.radius) / CONFIG.hazardSpeed)
+          : 0;
     const payload = {
       mode: state.mode,
       coords: 'origin top-left; x right; y down',
@@ -809,7 +1220,10 @@ export function createGame({ canvas, startBtn }) {
         maxHp: state.maxHp,
         invuln: Number(state.player.invuln.toFixed(2)),
         dashCooldown: Number(state.player.dashCooldown.toFixed(2)),
-        dashCooldownMax: CONFIG.dashCooldown,
+        dashCooldownMax: getDashCooldown(),
+        weaponId: state.player.weaponId,
+        shieldCooldown: Number(state.player.shieldCooldown.toFixed(2)),
+        shieldActive: Number(state.player.shieldActive.toFixed(2)),
         buffs: {
           rapidFire: Number(state.buffs.rapidFire.toFixed(2)),
         },
@@ -829,6 +1243,17 @@ export function createGame({ canvas, startBtn }) {
       pickups: {
         count: state.pickups.length,
         sample: pickupsPreview,
+      },
+      hazards: {
+        active: hazardActive,
+        mode: state.hazard.mode,
+        radius: Number(state.hazard.radius.toFixed(2)),
+        ttl: Number(hazardTtl.toFixed(2)),
+      },
+      upgrade: {
+        mode: state.upgrade.mode,
+        options: state.upgrade.options,
+        selected: state.upgrade.selected,
       },
       stats: state.stats,
     };
@@ -875,22 +1300,25 @@ export function createGame({ canvas, startBtn }) {
       tryDash();
       return;
     }
+    if (e.key === 'e' || e.key === 'E') {
+      e.preventDefault();
+      activateShield();
+      return;
+    }
+    if (e.key === '1' || e.key === '2' || e.key === '3') {
+      e.preventDefault();
+      const id = Number(e.key);
+      if (state.mode === 'upgrade') {
+        applyUpgrade(id);
+      } else {
+        setWeapon(id);
+      }
+      return;
+    }
 
     if (e.key.startsWith('Arrow')) {
       state.keys.add(e.key);
       e.preventDefault();
-    }
-  }
-
-  function ensurePauseInTest() {
-    if (testEnv && state.testScenario === 'pause') {
-      state.mode = 'paused';
-    }
-  }
-
-  function ensurePauseInTest() {
-    if (testEnv && state.testScenario === 'pause') {
-      state.mode = 'paused';
     }
   }
 
@@ -928,6 +1356,12 @@ export function createGame({ canvas, startBtn }) {
     resetPlay();
   }
 
+  function ensurePauseInTest() {
+    if (testEnv && state.testScenario === 'pause') {
+      state.mode = 'paused';
+    }
+  }
+
   function attach() {
     resize();
     window.addEventListener('resize', resize);
@@ -948,6 +1382,8 @@ export function createGame({ canvas, startBtn }) {
       state.testScenario = scenario || 'default';
       resetPlay();
     };
+    window.setWeapon = setWeapon;
+    window.forceUpgrade = forceUpgrade;
 
     if (state.mode === 'menu') {
       state.player.x = state.viewport.baseW / 2;

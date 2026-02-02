@@ -58,6 +58,29 @@ switch (scenario) {
   case "pause":
     assert(payload.mode === "paused", "mode should be paused");
     break;
+  case "weapon-cycle":
+    assert(payload.player?.weaponId === 3, "weaponId should be 3");
+    assert(payload.stats?.shotsFired >= 1, "shotsFired should be >= 1");
+    break;
+  case "shield":
+    assert(payload.player?.shieldCooldown > 0, "shieldCooldown should be > 0");
+    assert(payload.player?.hp === payload.player?.maxHp, "hp should stay at max with shield");
+    break;
+  case "streak":
+    assert(payload.stats?.streak >= 2, "streak should be >= 2");
+    assert(payload.stats?.multiplier >= 1, "multiplier should be >= 1");
+    break;
+  case "hazard":
+    assert(payload.hazards?.active === true, "hazard should be active");
+    break;
+  case "upgrade":
+    assert(payload.upgrade?.mode === "none", "upgrade mode should be none after selection");
+    assert(payload.upgrade?.selected !== null, "upgrade selected should be set");
+    break;
+  case "elite":
+    assert(payload.enemies?.sample?.[0]?.elite === true, "elite enemy should be present");
+    assert((payload.enemies?.sample?.[0]?.modifiers || []).length > 0, "elite modifiers should exist");
+    break;
   case "shooter":
     assert(payload.enemyBullets?.count > 0, "enemyBullets.count should be > 0");
     break;
