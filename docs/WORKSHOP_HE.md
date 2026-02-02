@@ -119,9 +119,22 @@ PR:
 gh pr create --fill
 ```
 
-## 6) איפה הקוד
+## 6) אוטומציה יומית (Codex)
+הרעיון: להריץ `./scripts/smoke.sh` כל יום ב־09:00, ולקבל inbox עם סיכום והארטיפקטים.
+
+מה האוטומציה עושה:
+1) Build
+2) Preview
+3) Playwright smoke
+4) שומר screenshots + state ב־`output/web-game/`
+
+אם תרצו, אפשר להגדיר אוטומציה דרך Codex עם המשימה:
+```bash
+./scripts/smoke.sh
+```
+
+## 7) איפה הקוד
 - המשחק: `src/game.js`
 - UI בסיסי (כפתור start וכו’): `src/main.js`
 - Smoke actions: `tests/playwright/actions-smoke.json`
 - Smoke runner: `scripts/smoke.sh`
-
