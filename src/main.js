@@ -11,6 +11,7 @@ document.querySelector('#app').innerHTML = `
         <div><span class="key">Arrows</span> Move</div>
         <div><span class="key">Mouse</span> Aim</div>
         <div><span class="key">Click</span> Shoot</div>
+        <div><span class="key">Shift</span> Dash</div>
         <div><span class="key">B</span> Pause</div>
         <div><span class="key">A</span> Restart</div>
         <div><span class="key">F</span> Fullscreen</div>

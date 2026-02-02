@@ -25,6 +25,7 @@ npm run dev
 - חיצים: תנועה
 - עכבר: כיוון
 - קליק שמאלי: ירי
+- Shift: Dash
 - `B`: Pause/Resume
 - `A`: Restart
 - `F`: Fullscreen toggle
@@ -80,6 +81,12 @@ node "$WEB_GAME_CLIENT" \
 1) `npm run build`
 2) מריץ `npm run preview` על פורט 4173
 3) מריץ Playwright client ומייצר ארטיפקטים ב־`output/web-game/`
+
+## 3.1) סוויטת בדיקות מלאה (Playwright)
+```bash
+./scripts/test-suite.sh
+```
+הסקריפט מריץ כמה סצנריואים ומוודא (אוטומטית) שהמצב תקין בעזרת `scripts/assert-state.mjs`.
 
 ## 4) Git – תרגול מומלץ (Hands-on)
 ### סטטוס בסיסי
@@ -143,4 +150,6 @@ gh pr create --fill
 - המשחק: `src/game.js`
 - UI בסיסי (כפתור start וכו’): `src/main.js`
 - Smoke actions: `tests/playwright/actions-smoke.json`
+- Test actions (suite): `tests/playwright/actions-*.json`
 - Smoke runner: `scripts/smoke.sh`
+- Test suite runner: `scripts/test-suite.sh`

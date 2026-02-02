@@ -1,5 +1,25 @@
 const FIXED_DT = 1 / 60;
 
+const CONFIG = {
+  maxHp: 5,
+  dashCooldown: 2.0,
+  dashDuration: 0.12,
+  dashSpeed: 520,
+  dashInvuln: 0.25,
+  baseFireCd: 0.18,
+  rapidFireCd: 0.08,
+  rapidFireDuration: 5,
+  waveDuration: 20,
+  waveDurationTest: 6,
+  baseMaxEnemies: 6,
+  maxEnemiesCap: 18,
+  pickupSpawnMin: 15,
+  pickupSpawnMax: 20,
+  pickupSpawnMinTest: 4,
+  pickupSpawnMaxTest: 7,
+  maxPickups: 2,
+};
+
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
 }
@@ -36,28 +56,47 @@ export function createGame({ canvas, startBtn }) {
   const ctx = canvas.getContext('2d', { alpha: false });
   if (!ctx) throw new Error('2D canvas not supported');
 
+  const initialScenario =
+    typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('scenario') || 'default' : 'default';
+
   const state = {
     mode: 'menu', // menu | play | paused | gameover
     time: 0,
     rngSeed: 1337,
     score: 0,
-    stats: { shotsFired: 0 },
+    stats: { shotsFired: 0, hits: 0, damageTaken: 0, dashesUsed: 0 },
+    maxHp: CONFIG.maxHp,
     player: {
       x: 0,
       y: 0,
       vx: 0,
       vy: 0,
       r: 14,
-      hp: 5,
+      hp: CONFIG.maxHp,
       invuln: 0,
       fireCd: 0,
+      dashCooldown: 0,
+      dashTime: 0,
+      dashDir: { x: 1, y: 0 },
+      lastMoveDir: { x: 1, y: 0 },
+    },
+    buffs: {
+      rapidFire: 0,
     },
     bullets: [],
+    enemyBullets: [],
     enemies: [],
+    pickups: [],
     pointer: { x: 0, y: 0, down: false },
     keys: new Set(),
     spawnTimer: 0,
-    lastHitAt: -999,
+    pickupTimer: 0,
+    wave: 1,
+    waveFlash: 0,
+    maxEnemies: CONFIG.baseMaxEnemies,
+    spawnDisabled: false,
+    testScenario: initialScenario,
+    testSpawnIndex: 0,
     viewport: {
       baseW: 960,
       baseH: 540,
@@ -107,33 +146,213 @@ export function createGame({ canvas, startBtn }) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
+  function setSeed(seed) {
+    state.rngSeed = Number(seed) || 0;
+    rng = makeRng(state.rngSeed);
+  }
+
+  function pickEnemyType() {
+    if (testEnv && state.testScenario === 'default') {
+      const pattern = ['chaser', 'chaser', 'shooter', 'chaser', 'tank'];
+      const type = pattern[state.testSpawnIndex % pattern.length];
+      state.testSpawnIndex += 1;
+      return type;
+    }
+    const waveFactor = Math.min(1, state.wave / 6);
+    const shooterWeight = 0.12 + waveFactor * 0.18;
+    const tankWeight = 0.06 + waveFactor * 0.14;
+    const chaserWeight = Math.max(0.4, 1 - shooterWeight - tankWeight);
+    const total = chaserWeight + shooterWeight + tankWeight;
+    const roll = rng() * total;
+    if (roll < chaserWeight) return 'chaser';
+    if (roll < chaserWeight + shooterWeight) return 'shooter';
+    return 'tank';
+  }
+
+  function makeEnemy(type, x, y, overrides = {}) {
+    if (type === 'shooter') {
+      return {
+        type,
+        x,
+        y,
+        r: 16,
+        hp: 2,
+        speed: randBetween(rng, 25, 55),
+        points: 2,
+        shootCd: randBetween(rng, 0.8, 1.6),
+        shootMin: 1.0,
+        shootMax: 2.0,
+        bulletSpeed: 170,
+        ...overrides,
+      };
+    }
+    if (type === 'tank') {
+      return {
+        type,
+        x,
+        y,
+        r: 22,
+        hp: 5,
+        speed: randBetween(rng, 20, 35),
+        points: 4,
+        ...overrides,
+      };
+    }
+    return {
+      type: 'chaser',
+      x,
+      y,
+      r: 16,
+      hp: 2,
+      speed: randBetween(rng, 45, 85),
+      points: 1,
+      ...overrides,
+    };
+  }
+
+  function spawnEnemy(typeOverride) {
+    const w = state.viewport.baseW;
+    const h = state.viewport.baseH;
+    const side = Math.floor(randBetween(rng, 0, 4));
+    const pad = 40;
+    let x = 0;
+    let y = 0;
+    if (side === 0) {
+      x = randBetween(rng, -pad, w + pad);
+      y = -pad;
+    } else if (side === 1) {
+      x = w + pad;
+      y = randBetween(rng, -pad, h + pad);
+    } else if (side === 2) {
+      x = randBetween(rng, -pad, w + pad);
+      y = h + pad;
+    } else {
+      x = -pad;
+      y = randBetween(rng, -pad, h + pad);
+    }
+    const type = typeOverride || pickEnemyType();
+    state.enemies.push(makeEnemy(type, x, y));
+  }
+
+  function spawnPickup(typeOverride) {
+    const w = state.viewport.baseW;
+    const h = state.viewport.baseH;
+    let x = randBetween(rng, 80, w - 80);
+    let y = randBetween(rng, 80, h - 80);
+    if (len(x - state.player.x, y - state.player.y) < 120) {
+      x = clamp(state.player.x + 140, 80, w - 80);
+      y = clamp(state.player.y + 40, 80, h - 80);
+    }
+    const type = typeOverride || (rng() < 0.55 ? 'hp' : 'rapid');
+    state.pickups.push({
+      type,
+      x,
+      y,
+      r: 11,
+      ttl: 12,
+    });
+  }
+
+  function applyScenario() {
+    state.spawnDisabled = false;
+    state.pickupTimer = testEnv
+      ? randBetween(rng, CONFIG.pickupSpawnMinTest, CONFIG.pickupSpawnMaxTest)
+      : randBetween(rng, CONFIG.pickupSpawnMin, CONFIG.pickupSpawnMax);
+    state.testSpawnIndex = 0;
+
+    const scenario = state.testScenario || 'default';
+    if (scenario === 'shoot-score') {
+      state.spawnDisabled = true;
+      state.enemies.push(
+        makeEnemy('chaser', state.player.x + 260, state.player.y, { hp: 1, speed: 0, points: 2 })
+      );
+    } else if (scenario === 'shooter') {
+      state.spawnDisabled = true;
+      state.enemies.push(
+        makeEnemy('shooter', state.player.x + 260, state.player.y - 40, {
+          speed: 0,
+          shootCd: 0.3,
+          shootMin: 0.4,
+          shootMax: 0.8,
+        })
+      );
+    } else if (scenario === 'tank') {
+      state.spawnDisabled = true;
+      state.enemies.push(
+        makeEnemy('tank', state.player.x + 260, state.player.y, {
+          speed: 0,
+          hp: 3,
+          points: 4,
+        })
+      );
+    } else if (scenario === 'powerups') {
+      state.spawnDisabled = true;
+      state.player.hp = Math.max(1, state.maxHp - 1);
+      state.pickups.push({
+        type: 'hp',
+        x: state.player.x + 80,
+        y: state.player.y,
+        r: 11,
+        ttl: 12,
+      });
+      state.pickups.push({
+        type: 'rapid',
+        x: state.player.x + 140,
+        y: state.player.y,
+        r: 11,
+        ttl: 12,
+      });
+    } else if (scenario === 'gameover') {
+      state.spawnDisabled = true;
+      state.player.hp = 1;
+      state.enemies.push(makeEnemy('chaser', state.player.x, state.player.y, { speed: 0 }));
+    } else if (scenario === 'pause') {
+      state.spawnDisabled = true;
+      state.mode = 'paused';
+    } else if (scenario === 'dash') {
+      state.spawnDisabled = true;
+    } else if (scenario === 'wave') {
+      state.spawnDisabled = false;
+    }
+  }
+
   function resetPlay() {
     state.mode = 'play';
     state.time = 0;
     state.score = 0;
-    state.stats.shotsFired = 0;
+    state.stats = { shotsFired: 0, hits: 0, damageTaken: 0, dashesUsed: 0 };
     state.bullets = [];
+    state.enemyBullets = [];
     state.enemies = [];
+    state.pickups = [];
     state.spawnTimer = 1.0;
+    state.pickupTimer = testEnv
+      ? randBetween(rng, CONFIG.pickupSpawnMinTest, CONFIG.pickupSpawnMaxTest)
+      : randBetween(rng, CONFIG.pickupSpawnMin, CONFIG.pickupSpawnMax);
+    state.wave = 1;
+    state.waveFlash = 0;
+    state.maxEnemies = CONFIG.baseMaxEnemies;
+    state.spawnDisabled = false;
+    state.testSpawnIndex = 0;
+
     rng = makeRng(state.rngSeed);
     state.player.x = state.viewport.baseW / 2;
     state.player.y = state.viewport.baseH / 2;
     state.player.vx = 0;
     state.player.vy = 0;
-    state.player.hp = 5;
+    state.player.hp = state.maxHp;
     state.player.invuln = 0;
     state.player.fireCd = 0;
+    state.player.dashCooldown = 0;
+    state.player.dashTime = 0;
+    state.player.dashDir = { x: 1, y: 0 };
+    state.player.lastMoveDir = { x: 1, y: 0 };
+    state.buffs.rapidFire = 0;
     state.lastHitAt = -999;
+    state.pointer.x = state.player.x;
+    state.pointer.y = state.player.y;
 
-    // Deterministic "training drone" for smoke tests: one easy early kill for score.
-    state.enemies.push({
-      x: state.player.x + 260,
-      y: state.player.y,
-      r: 16,
-      hp: 1,
-      speed: 0,
-      points: 2,
-    });
+    applyScenario();
   }
 
   function setMode(next) {
@@ -154,43 +373,24 @@ export function createGame({ canvas, startBtn }) {
     }
   }
 
-  function spawnEnemy() {
-    const w = state.viewport.baseW;
-    const h = state.viewport.baseH;
-    const side = Math.floor(randBetween(rng, 0, 4));
-    const pad = 40;
-    let x = 0;
-    let y = 0;
-    if (side === 0) {
-      x = randBetween(rng, -pad, w + pad);
-      y = -pad;
-    } else if (side === 1) {
-      x = w + pad;
-      y = randBetween(rng, -pad, h + pad);
-    } else if (side === 2) {
-      x = randBetween(rng, -pad, w + pad);
-      y = h + pad;
-    } else {
-      x = -pad;
-      y = randBetween(rng, -pad, h + pad);
+  function damagePlayer(amount) {
+    if (state.player.invuln > 0) return;
+    state.player.hp = Math.max(0, state.player.hp - amount);
+    state.stats.damageTaken += amount;
+    state.player.invuln = 0.75;
+    state.lastHitAt = state.time;
+    if (state.player.hp <= 0) {
+      state.mode = 'gameover';
     }
-    state.enemies.push({
-      x,
-      y,
-      r: 16,
-      hp: 2,
-      speed: randBetween(rng, 35, 75),
-      points: 1,
-    });
   }
 
   function shootAt(wx, wy) {
     if (state.player.fireCd > 0) return;
-    state.player.fireCd = 0.18;
+    const fireCd = state.buffs.rapidFire > 0 ? CONFIG.rapidFireCd : CONFIG.baseFireCd;
+    state.player.fireCd = fireCd;
     const dx = wx - state.player.x;
     const dy = wy - state.player.y;
     let dir = norm(dx, dy);
-    // If the click lands too close to the player center (common in automation), shoot right.
     if (Math.hypot(dx, dy) < 3) dir = { x: 1, y: 0 };
     const speed = 420;
     state.bullets.push({
@@ -204,55 +404,118 @@ export function createGame({ canvas, startBtn }) {
     state.stats.shotsFired += 1;
   }
 
+  function tryDash() {
+    if (state.mode !== 'play') return false;
+    if (state.player.dashCooldown > 0) return false;
+    let dir = state.player.lastMoveDir;
+    if (!dir || (dir.x === 0 && dir.y === 0)) {
+      dir = norm(state.pointer.x - state.player.x, state.pointer.y - state.player.y);
+    }
+    if (dir.x === 0 && dir.y === 0) dir = { x: 1, y: 0 };
+    state.player.dashDir = dir;
+    state.player.dashTime = CONFIG.dashDuration;
+    state.player.dashCooldown = CONFIG.dashCooldown;
+    state.player.invuln = Math.max(state.player.invuln, CONFIG.dashInvuln);
+    state.stats.dashesUsed += 1;
+    return true;
+  }
+
   function update(dt) {
     if (state.mode !== 'play') return;
 
     state.time += dt;
     state.player.invuln = Math.max(0, state.player.invuln - dt);
     state.player.fireCd = Math.max(0, state.player.fireCd - dt);
+    state.player.dashCooldown = Math.max(0, state.player.dashCooldown - dt);
+    state.buffs.rapidFire = Math.max(0, state.buffs.rapidFire - dt);
 
-    const accel = 820;
-    const maxSpeed = 220;
-    const friction = 0.88;
-    let ax = 0;
-    let ay = 0;
-    if (state.keys.has('ArrowLeft')) ax -= 1;
-    if (state.keys.has('ArrowRight')) ax += 1;
-    if (state.keys.has('ArrowUp')) ay -= 1;
-    if (state.keys.has('ArrowDown')) ay += 1;
-    if (ax || ay) {
-      const d = norm(ax, ay);
-      state.player.vx += d.x * accel * dt;
-      state.player.vy += d.y * accel * dt;
+    if (state.player.dashTime > 0) {
+      state.player.dashTime = Math.max(0, state.player.dashTime - dt);
+      state.player.x += state.player.dashDir.x * CONFIG.dashSpeed * dt;
+      state.player.y += state.player.dashDir.y * CONFIG.dashSpeed * dt;
     } else {
-      state.player.vx *= friction;
-      state.player.vy *= friction;
+      const accel = 820;
+      const maxSpeed = 220;
+      const friction = 0.88;
+      let ax = 0;
+      let ay = 0;
+      if (state.keys.has('ArrowLeft')) ax -= 1;
+      if (state.keys.has('ArrowRight')) ax += 1;
+      if (state.keys.has('ArrowUp')) ay -= 1;
+      if (state.keys.has('ArrowDown')) ay += 1;
+      if (ax || ay) {
+        const d = norm(ax, ay);
+        state.player.lastMoveDir = d;
+        state.player.vx += d.x * accel * dt;
+        state.player.vy += d.y * accel * dt;
+      } else {
+        state.player.vx *= friction;
+        state.player.vy *= friction;
+      }
+      const sp = len(state.player.vx, state.player.vy);
+      if (sp > maxSpeed) {
+        const d = norm(state.player.vx, state.player.vy);
+        state.player.vx = d.x * maxSpeed;
+        state.player.vy = d.y * maxSpeed;
+      }
+      state.player.x += state.player.vx * dt;
+      state.player.y += state.player.vy * dt;
     }
-    const sp = len(state.player.vx, state.player.vy);
-    if (sp > maxSpeed) {
-      const d = norm(state.player.vx, state.player.vy);
-      state.player.vx = d.x * maxSpeed;
-      state.player.vy = d.y * maxSpeed;
-    }
-    state.player.x += state.player.vx * dt;
-    state.player.y += state.player.vy * dt;
 
     const w = state.viewport.baseW;
     const h = state.viewport.baseH;
     state.player.x = clamp(state.player.x, state.player.r, w - state.player.r);
     state.player.y = clamp(state.player.y, state.player.r, h - state.player.r);
 
-    state.spawnTimer -= dt;
-    if (state.spawnTimer <= 0) {
-      spawnEnemy();
-      const intensity = clamp(1 + state.time / 30, 1, 2.5);
-      state.spawnTimer = randBetween(rng, 1.0 / intensity, 1.8 / intensity);
+    const waveDuration = testEnv ? CONFIG.waveDurationTest : CONFIG.waveDuration;
+    const nextWave = Math.floor(state.time / waveDuration) + 1;
+    if (nextWave !== state.wave) {
+      state.wave = nextWave;
+      state.waveFlash = 1.25;
+    }
+    state.waveFlash = Math.max(0, state.waveFlash - dt);
+    state.maxEnemies = clamp(CONFIG.baseMaxEnemies + state.wave * 2, CONFIG.baseMaxEnemies, CONFIG.maxEnemiesCap);
+
+    if (!state.spawnDisabled) {
+      state.spawnTimer -= dt;
+      if (state.spawnTimer <= 0 && state.enemies.length < state.maxEnemies) {
+        spawnEnemy();
+        const intensity = clamp(1 + state.wave * 0.2, 1, 3.2);
+        state.spawnTimer = randBetween(rng, 1.0 / intensity, 1.8 / intensity);
+      }
+    }
+
+    if (!state.spawnDisabled && state.pickups.length < CONFIG.maxPickups) {
+      state.pickupTimer -= dt;
+      if (state.pickupTimer <= 0) {
+        spawnPickup();
+        state.pickupTimer = testEnv
+          ? randBetween(rng, CONFIG.pickupSpawnMinTest, CONFIG.pickupSpawnMaxTest)
+          : randBetween(rng, CONFIG.pickupSpawnMin, CONFIG.pickupSpawnMax);
+      }
     }
 
     for (const e of state.enemies) {
       const d = norm(state.player.x - e.x, state.player.y - e.y);
       e.x += d.x * e.speed * dt;
       e.y += d.y * e.speed * dt;
+      if (e.type === 'shooter') {
+        e.shootCd -= dt;
+        if (e.shootCd <= 0 && state.enemyBullets.length < 16) {
+          const dir = norm(state.player.x - e.x, state.player.y - e.y);
+          state.enemyBullets.push({
+            x: e.x + dir.x * (e.r + 4),
+            y: e.y + dir.y * (e.r + 4),
+            vx: dir.x * e.bulletSpeed,
+            vy: dir.y * e.bulletSpeed,
+            r: 4,
+            ttl: 3.5,
+          });
+          const min = e.shootMin ?? 1.0;
+          const max = e.shootMax ?? 2.2;
+          e.shootCd = randBetween(rng, min, max);
+        }
+      }
     }
 
     for (const b of state.bullets) {
@@ -262,6 +525,13 @@ export function createGame({ canvas, startBtn }) {
     }
     state.bullets = state.bullets.filter((b) => b.ttl > 0);
 
+    for (const b of state.enemyBullets) {
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      b.ttl -= dt;
+    }
+    state.enemyBullets = state.enemyBullets.filter((b) => b.ttl > 0);
+
     // bullet ↔ enemy
     for (const b of state.bullets) {
       for (const e of state.enemies) {
@@ -270,6 +540,7 @@ export function createGame({ canvas, startBtn }) {
         if (d <= b.r + e.r) {
           e.hp -= 1;
           b.ttl = 0;
+          state.stats.hits += 1;
           if (e.hp <= 0) state.score += e.points || 1;
           break;
         }
@@ -278,20 +549,42 @@ export function createGame({ canvas, startBtn }) {
     state.bullets = state.bullets.filter((b) => b.ttl > 0);
     state.enemies = state.enemies.filter((e) => e.hp > 0);
 
+    // enemy bullets ↔ player
+    for (const b of state.enemyBullets) {
+      const d = len(b.x - state.player.x, b.y - state.player.y);
+      if (d <= b.r + state.player.r) {
+        b.ttl = 0;
+        damagePlayer(1);
+      }
+    }
+    state.enemyBullets = state.enemyBullets.filter((b) => b.ttl > 0);
+
     // enemy ↔ player
     for (const e of state.enemies) {
       const d = len(e.x - state.player.x, e.y - state.player.y);
       if (d <= e.r + state.player.r) {
-        if (state.player.invuln <= 0) {
-          state.player.hp -= 1;
-          state.player.invuln = 0.75;
-          state.lastHitAt = state.time;
-          const push = norm(state.player.x - e.x, state.player.y - e.y);
-          state.player.vx += push.x * 220;
-          state.player.vy += push.y * 220;
-        }
+        damagePlayer(1);
+        const push = norm(state.player.x - e.x, state.player.y - e.y);
+        state.player.vx += push.x * 220;
+        state.player.vy += push.y * 220;
       }
     }
+
+    // pickups ↔ player
+    for (const p of state.pickups) {
+      const d = len(p.x - state.player.x, p.y - state.player.y);
+      if (d <= p.r + state.player.r) {
+        if (p.type === 'hp') {
+          state.player.hp = Math.min(state.maxHp, state.player.hp + 1);
+        } else if (p.type === 'rapid') {
+          state.buffs.rapidFire = Math.max(state.buffs.rapidFire, CONFIG.rapidFireDuration);
+        }
+        p.ttl = 0;
+      } else {
+        p.ttl -= dt;
+      }
+    }
+    state.pickups = state.pickups.filter((p) => p.ttl > 0);
 
     if (state.player.hp <= 0) {
       state.mode = 'gameover';
@@ -329,20 +622,53 @@ export function createGame({ canvas, startBtn }) {
       ctx.fillRect(0, 0, state.viewport.baseW, state.viewport.baseH);
       drawCenteredText('Orbit Runner', state.viewport.baseW / 2, 150, 56);
       drawCenteredText('Arrows: Move  •  Mouse: Aim  •  Click: Shoot', state.viewport.baseW / 2, 240, 18, 'rgba(255,255,255,0.9)');
-      drawCenteredText('B: Pause  •  A: Restart  •  F: Fullscreen', state.viewport.baseW / 2, 270, 18, 'rgba(255,255,255,0.8)');
+      drawCenteredText('Shift: Dash  •  B: Pause  •  A: Restart', state.viewport.baseW / 2, 270, 18, 'rgba(255,255,255,0.8)');
+      drawCenteredText('F: Fullscreen', state.viewport.baseW / 2, 296, 16, 'rgba(255,255,255,0.7)');
       ctx.restore();
       return;
     }
 
+    // pickups
+    for (const p of state.pickups) {
+      if (p.type === 'hp') {
+        ctx.fillStyle = '#22c55e';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.fillRect(p.x - 2, p.y - 7, 4, 14);
+        ctx.fillRect(p.x - 7, p.y - 2, 14, 4);
+      } else {
+        ctx.fillStyle = '#facc15';
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y - p.r);
+        ctx.lineTo(p.x + p.r, p.y);
+        ctx.lineTo(p.x, p.y + p.r);
+        ctx.lineTo(p.x - p.r, p.y);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+
     // enemies
     for (const e of state.enemies) {
-      ctx.fillStyle = '#ff4d6d';
+      if (e.type === 'shooter') ctx.fillStyle = '#a855f7';
+      else if (e.type === 'tank') ctx.fillStyle = '#f97316';
+      else ctx.fillStyle = '#ff4d6d';
       ctx.beginPath();
       ctx.arc(e.x, e.y, e.r, 0, Math.PI * 2);
       ctx.fill();
       ctx.fillStyle = 'rgba(0,0,0,0.3)';
       ctx.beginPath();
       ctx.arc(e.x - 4, e.y - 4, e.r * 0.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // enemy bullets
+    for (const b of state.enemyBullets) {
+      ctx.fillStyle = '#fb7185';
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
       ctx.fill();
     }
 
@@ -375,8 +701,21 @@ export function createGame({ canvas, startBtn }) {
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
     ctx.fillText(`Score: ${state.score}`, 12, 12);
-    ctx.fillText(`HP: ${Math.max(0, state.player.hp)}`, 12, 32);
+    ctx.fillText(`HP: ${Math.max(0, state.player.hp)}/${state.maxHp}`, 12, 32);
     ctx.fillText(`Shots: ${state.stats.shotsFired}`, 12, 52);
+    const dashLabel =
+      state.player.dashCooldown > 0 ? `Dash: ${state.player.dashCooldown.toFixed(1)}s` : 'Dash: Ready';
+    ctx.fillText(dashLabel, 12, 72);
+    if (state.buffs.rapidFire > 0) {
+      ctx.fillText(`Rapid: ${state.buffs.rapidFire.toFixed(1)}s`, 12, 92);
+    }
+    ctx.textAlign = 'right';
+    ctx.fillText(`Wave ${state.wave}`, state.viewport.baseW - 12, 12);
+
+    if (state.waveFlash > 0) {
+      const alpha = clamp(state.waveFlash, 0, 1);
+      drawCenteredText(`Wave ${state.wave}`, state.viewport.baseW / 2, 80, 36, `rgba(255,255,255,${alpha})`);
+    }
 
     if (state.mode === 'paused') {
       ctx.fillStyle = 'rgba(0,0,0,0.45)';
@@ -418,15 +757,35 @@ export function createGame({ canvas, startBtn }) {
       }
     }
     render();
+    ensurePauseInTest();
   }
 
   function renderGameToText() {
-    const enemiesPreview = state.enemies.slice(0, 10).map((e) => ({ x: e.x, y: e.y, r: e.r, hp: e.hp }));
+    const enemiesPreview = state.enemies.slice(0, 10).map((e) => ({
+      x: Number(e.x.toFixed(2)),
+      y: Number(e.y.toFixed(2)),
+      r: e.r,
+      hp: e.hp,
+      type: e.type,
+    }));
     const bulletsPreview = state.bullets.slice(0, 5).map((b) => ({
       x: Number(b.x.toFixed(2)),
       y: Number(b.y.toFixed(2)),
       r: b.r,
       ttl: Number(b.ttl.toFixed(2)),
+    }));
+    const enemyBulletsPreview = state.enemyBullets.slice(0, 5).map((b) => ({
+      x: Number(b.x.toFixed(2)),
+      y: Number(b.y.toFixed(2)),
+      r: b.r,
+      ttl: Number(b.ttl.toFixed(2)),
+    }));
+    const pickupsPreview = state.pickups.slice(0, 5).map((p) => ({
+      x: Number(p.x.toFixed(2)),
+      y: Number(p.y.toFixed(2)),
+      r: p.r,
+      type: p.type,
+      ttl: Number(p.ttl.toFixed(2)),
     }));
     const payload = {
       mode: state.mode,
@@ -437,6 +796,8 @@ export function createGame({ canvas, startBtn }) {
         scale: state.viewport.scale,
       },
       time: Number(state.time.toFixed(3)),
+      wave: state.wave,
+      maxEnemies: state.maxEnemies,
       score: state.score,
       player: {
         x: Number(state.player.x.toFixed(2)),
@@ -445,7 +806,13 @@ export function createGame({ canvas, startBtn }) {
         vy: Number(state.player.vy.toFixed(2)),
         r: state.player.r,
         hp: state.player.hp,
+        maxHp: state.maxHp,
         invuln: Number(state.player.invuln.toFixed(2)),
+        dashCooldown: Number(state.player.dashCooldown.toFixed(2)),
+        dashCooldownMax: CONFIG.dashCooldown,
+        buffs: {
+          rapidFire: Number(state.buffs.rapidFire.toFixed(2)),
+        },
       },
       enemies: {
         count: state.enemies.length,
@@ -454,6 +821,14 @@ export function createGame({ canvas, startBtn }) {
       bullets: {
         count: state.bullets.length,
         sample: bulletsPreview,
+      },
+      enemyBullets: {
+        count: state.enemyBullets.length,
+        sample: enemyBulletsPreview,
+      },
+      pickups: {
+        count: state.pickups.length,
+        sample: pickupsPreview,
       },
       stats: state.stats,
     };
@@ -490,20 +865,37 @@ export function createGame({ canvas, startBtn }) {
       }
       return;
     }
+    if (e.key === 'Shift') {
+      e.preventDefault();
+      tryDash();
+      return;
+    }
+    if (e.key === ' ') {
+      e.preventDefault();
+      tryDash();
+      return;
+    }
 
     if (e.key.startsWith('Arrow')) {
       state.keys.add(e.key);
       e.preventDefault();
     }
-    if (e.key === ' ') {
-      state.keys.add('Space');
-      e.preventDefault();
+  }
+
+  function ensurePauseInTest() {
+    if (testEnv && state.testScenario === 'pause') {
+      state.mode = 'paused';
+    }
+  }
+
+  function ensurePauseInTest() {
+    if (testEnv && state.testScenario === 'pause') {
+      state.mode = 'paused';
     }
   }
 
   function onKeyUp(e) {
     if (e.key.startsWith('Arrow')) state.keys.delete(e.key);
-    if (e.key === ' ') state.keys.delete('Space');
   }
 
   function onPointerMove(e) {
@@ -523,7 +915,6 @@ export function createGame({ canvas, startBtn }) {
   }
 
   function onMouseDown(e) {
-    // Some environments may not emit pointer events reliably under automation.
     if (state.mode === 'menu') {
       resetPlay();
       return;
@@ -552,10 +943,17 @@ export function createGame({ canvas, startBtn }) {
 
     window.render_game_to_text = renderGameToText;
     window.advanceTime = advanceTime;
+    window.setSeed = setSeed;
+    window.resetTestScenario = (scenario) => {
+      state.testScenario = scenario || 'default';
+      resetPlay();
+    };
 
     if (state.mode === 'menu') {
       state.player.x = state.viewport.baseW / 2;
       state.player.y = state.viewport.baseH / 2;
+      state.pointer.x = state.player.x;
+      state.pointer.y = state.player.y;
     }
     loop();
   }
